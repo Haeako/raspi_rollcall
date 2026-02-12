@@ -1,0 +1,11 @@
+TensorFlow == 2.8.0
+Keras == 2.8.0
+numpy < 2.0
+keras_cv_attention_models
+glob2
+pandas
+tqdm
+sklearn
+scikit-image
+opencv-python-headless
+protobuf <= 3.20
