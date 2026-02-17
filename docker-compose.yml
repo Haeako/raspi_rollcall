@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+
+  # Backend Service
+  backend:
+    image: haeako/dev_raspi:v2  
+    container_name: backend
+    working_dir: /workspace/core/app/backend
+    command: bash -c "python3 main.py"
+    ports:
+      - "8000:8000"  # Adjust port if needed
+      - "5000:5000"  # For Flask docs if needed
+    depends_on:
+      - qdrant
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # Frontend Service
+  frontend:
+    image: haeako/dev_raspi:v2  
+    container_name: frontend
+    working_dir: /workspace/core/app/face-recognition
+    command: bash -c "source /root/.nvm/nvm.sh && nvm use 21 && npm run dev -- --host" 
+    ports:
+      - "3000:3000"  # Adjust port if needed
+      - "5173:5173"  # For Vite if needed
+    depends_on:
+      - backend
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+volumes:
+  qdrant_storage:
+    driver: local
+
+networks:
+  default:
+    name: app_network
