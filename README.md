@@ -1,5 +1,5 @@
 # Face Recognition System - Docker Setup
-# Chạy máy host là Ubuntu, Windowm cần phải setup port cho vite
+# Chạy máy host là Ubuntu, Windown cần phải setup port cho vite
 ## 🚀 Khởi động nhanh
 
 ```bash
