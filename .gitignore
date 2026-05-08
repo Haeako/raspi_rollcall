@@ -1,1 +1,10 @@
 external/GhostFaceNet
+capture.jpg
+output.jpg
+core/__pycache__/
+core/src/__pycache__/
+test/__pycache__/
+weights/det_10g.onnx
+weights/w600k_r50.onnx
+captures/test.jpg
+test/lol.png
