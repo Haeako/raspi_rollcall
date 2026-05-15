@@ -3,7 +3,7 @@ import numpy as np
 import logging
 from skimage.io import imread
 import sys
-sys.path.append("external/face-reidentification")
+sys.path.append("../external/face-reidentification")
 from models import SCRFD, ArcFace
 
 logger = logging.getLogger(__name__)
