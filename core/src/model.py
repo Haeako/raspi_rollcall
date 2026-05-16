@@ -3,7 +3,14 @@ import numpy as np
 import logging
 from skimage.io import imread
 import sys
-sys.path.append("../external/face-reidentification")
+from pathlib import Path
+
+# Add face-reidentification to path using absolute paths
+from ..paths import get_face_reid_path
+face_reid_path = get_face_reid_path()
+print(f"Face ReID path: {face_reid_path}")
+sys.path.insert(0, str(face_reid_path))
+
 from models import SCRFD, ArcFace
 
 logger = logging.getLogger(__name__)
@@ -13,13 +20,22 @@ class FaceModel:
 
     def __init__(
         self,
-        det_weight: str = "weights/det_10g.onnx",
-        rec_weight: str = "weights/w600k_r50.onnx",
+        det_weight: str = "det_10g.onnx",
+        rec_weight: str = "w600k_r50.onnx",
         confidence_thresh: float = 0.5,
         input_size: tuple = (640, 640),
     ):
-        self.det = SCRFD(det_weight, input_size=input_size, conf_thres=confidence_thresh)
-        self.face_model = ArcFace(rec_weight)
+        from ..paths import get_weight_path
+        
+        det_path = get_weight_path(det_weight)
+        rec_path = get_weight_path(rec_weight)
+        
+        try:
+            self.det = SCRFD(str(det_path), input_size=input_size, conf_thres=confidence_thresh)
+            self.face_model = ArcFace(str(rec_path))
+        except Exception as e:
+            logger.error(f"Failed to load face models: {e}")
+            raise RuntimeError(f"Face model initialization failed: {e}") from e
 
     def detect(self, image: np.ndarray, image_format: str = "BGR"):
         """Detect faces và trả về bboxes, kpss, confidence.
