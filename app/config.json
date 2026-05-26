@@ -1,17 +1,18 @@
 {
-    "mode": "both",
     "trigger": "sensor",
     "sensor_pin": 26,
     "sensor_cooldown": 3.0,
+    "camera_width": 320,
+    "camera_height": 240,
+    "camera_framerate": 10,
+    "camera_buffer_count": 2,
     "face_confidence_thresh": 0.5,
     "face_threshold": 0.4,
     "face_timeout": 5.0,
     "fp_timeout": 10.0,
-    "fp_enroll_timeout": 30.0,
     "worker_startup_timeout": 90.0,
-    "idle_log_interval": 5.0,
     "det_weight": "det_10g.onnx",
     "rec_weight": "w600k_r50.onnx",
-    "qdrant_host": "qdrant",
+    "qdrant_host": "localhost",
     "qdrant_port": 6333
 }

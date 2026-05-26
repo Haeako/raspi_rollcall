@@ -1,76 +1,103 @@
-from pathlib import Path
+"""Picamera2 wrapper that returns RGB frames."""
+
+import logging
 import time
+from pathlib import Path
+
 import numpy as np
 from picamera2 import Picamera2
 
+logger = logging.getLogger(__name__)
+
 
 class PiCamera:
-    """
-    Wrapper picamera2 tối ưu cho inference realtime.
-
-    Thay đổi so với bản gốc:
-      - create_video_configuration thay vì create_still_configuration
-        → không còn bị block 1-3s mỗi lần capture_array
-      - Resolution mặc định 640x480 (đủ cho SCRFD, nhẹ hơn 16x so với 2592x1944)
-      - Format BGR888 → thẳng vào OpenCV/SCRFD, không cần convert
-      - Warm-up tự động sau start để AE/AWB ổn định
-      - capture() vẫn dùng được để lưu file jpg
-    """
-
     def __init__(
         self,
-        width:      int   = 640,
-        height:     int   = 480,
-        framerate:  int   = 30,
-        warmup_sec: float = 2.0,
-    ):
+        width: int = 320,
+        height: int = 240,
+        framerate: int = 10,
+        warmup_sec: float = 1.0,
+        buffer_count: int = 2,
+    ) -> None:
+        self.width = width
+        self.height = height
+        self.framerate = framerate
+        self.warmup_sec = warmup_sec
+        self.buffer_count = buffer_count
         self.picam = Picamera2()
+        self._configure()
+        self._start()
 
-        # Video config: non-blocking, stream liên tục
+    def _configure(self) -> None:
         config = self.picam.create_video_configuration(
             main={
-                "size":   (width, height),
-                "format": "BGR888",   # BGR → dùng thẳng cho OpenCV & SCRFD
+                "size": (self.width, self.height),
+                "format": "RGB888",
             },
-            controls={
-                "FrameRate": framerate,
-            },
-            buffer_count=4,           # buffer nhỏ → latency thấp
+            controls={"FrameRate": self.framerate},
+            buffer_count=self.buffer_count,
         )
-
         self.picam.configure(config)
-        self.picam.start()
 
-        # Warm-up: chờ AE/AWB hội tụ
-        time.sleep(warmup_sec)
-        print("[INFO] CAMERA START")
+    def _start(self) -> None:
+        last_error = None
+        for attempt in range(3):
+            try:
+                self.picam.start()
+                time.sleep(self.warmup_sec)
+                logger.info(
+                    "Camera started (%sx%s@%s, buffers=%s)",
+                    self.width,
+                    self.height,
+                    self.framerate,
+                    self.buffer_count,
+                )
+                return
+            except Exception as error:
+                last_error = error
+                logger.warning("Camera start failed (%s/3): %s", attempt + 1, error)
+                self._stop_quietly()
+                time.sleep(0.5)
+
+        raise RuntimeError(f"Camera start failed after retries: {last_error}")
+
+    def _stop_quietly(self) -> None:
+        try:
+            self.picam.stop()
+        except Exception:
+            pass
 
     def capture_array(self) -> np.ndarray:
-        """
-        Trả về frame hiện tại dạng numpy array BGR uint8.
-        Non-blocking, lấy frame mới nhất từ buffer (~1ms).
-        """
-        return self.picam.capture_array("main")
+        try:
+            return self.picam.capture_array("main")
+        except Exception as error:
+            logger.warning("Camera capture failed; restarting camera: %s", error)
+            self._stop_quietly()
+            time.sleep(0.5)
+            self._start()
+            return self.picam.capture_array("main")
 
     def capture(self, filepath: str = "capture.jpg") -> str:
-        """
-        Lưu frame hiện tại ra file jpg.
-        Dùng capture_array + imencode để tránh switch sang still mode.
-        """
         import cv2
 
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        frame = self.capture_array()                  # BGR
+        frame = cv2.cvtColor(self.capture_array(), cv2.COLOR_RGB2BGR)
         cv2.imwrite(filepath, frame)
         return filepath
 
-    def close(self):
-        self.picam.stop()
+    def close(self) -> None:
+        self._stop_quietly()
         self.picam.close()
 
 
-if __name__ == "__main__":
+def main() -> None:
     cam = PiCamera()
-    path = cam.capture("captures/test.jpg")
-    print(f"Đã chụp: {path}")
-    cam.close()
+    try:
+        path = cam.capture("captures/test.jpg")
+        print(f"Captured: {path}")
+    finally:
+        cam.close()
+
+
+if __name__ == "__main__":
+    main()

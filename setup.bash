@@ -15,11 +15,15 @@ apt install -y \
     libopencv-dev \
     python3-picamera2 \
     python3-libcamera \
+    python3-gpiozero \
+    python3-lgpio \
+    python3-pil \
+    python3-spidev \
+    python3-flask \
     libdrm-dev \
     libegl1-mesa-dev \
     libgles2-mesa-dev
 
-apt install -y python3-rpi.gpio
 pip install -r requirements.txt 
 
 cd weight

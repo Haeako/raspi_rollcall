@@ -1,4 +1,7 @@
 external/GhostFaceNet
+__pycache__/
+*.py[cod]
+.pytest_cache/
 capture.jpg
 output.jpg
 core/__pycache__/
@@ -8,3 +11,6 @@ weights/det_10g.onnx
 weights/w600k_r50.onnx
 captures/test.jpg
 test/lol.png
+data/rollcall.db
+data/captures/
+data/test.jpg

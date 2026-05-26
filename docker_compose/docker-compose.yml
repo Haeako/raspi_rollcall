@@ -1,0 +1,72 @@
+services:
+  qdrant:
+    image: y0mg/qdrant-raspberry-pi
+    container_name: qdrant
+
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+    restart: unless-stopped
+
+    networks:
+      - app_network
+
+  backend:
+    image: heaeko/dev_raspi:v5
+    container_name: backend
+
+    working_dir: /workspace/raspi_rollcall
+    command: tail -f /dev/null
+
+    privileged: true
+
+    ipc: host
+
+    ports:
+      - "5000:5000"
+
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace/raspi_rollcall:/usr/lib/python3/dist-packages
+
+    volumes:
+      - /home/raspi/Documents/raspi_rollcall:/workspace/raspi_rollcall
+
+      # camera stack
+      - /run/udev:/run/udev:ro
+
+      # optional
+      - /dev:/dev
+
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video1:/dev/video1
+      - /dev/media0:/dev/media0
+      - /dev/media1:/dev/media1
+      - /dev/gpiomem:/dev/gpiomem
+      - /dev/gpiochip0:/dev/gpiochip0
+      - /dev/i2c-1:/dev/i2c-1
+      - /dev/spidev0.0:/dev/spidev0.0
+      - /dev/spidev0.1:/dev/spidev0.1
+
+    depends_on:
+      - qdrant
+
+    restart: unless-stopped
+
+    networks:
+      - app_network
+
+volumes:
+  qdrant_storage:
+
+networks:
+  app_network:
+    driver: bridge

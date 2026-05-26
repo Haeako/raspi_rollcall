@@ -18,3 +18,6 @@ scikit-fuzzy
 qdrant_client == 1.7.3
 picamera2
 onnxruntime
+Flask
+Pillow
+spidev

@@ -1,16 +1,13 @@
+import json
 import logging
+import urllib.request
+
 import numpy as np
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance, VectorParams, PointStruct,
-    Filter, FieldCondition, MatchValue
-)
 
 logger = logging.getLogger(__name__)
 
 
 class Qdrant_db:
-
     def __init__(
         self,
         host: str = "qdrant",
@@ -20,61 +17,96 @@ class Qdrant_db:
     ):
         self.collection_name = collection_name
         self.embedding_size = embedding_size
-        self.client = QdrantClient(host=host, port=port)
+        self.base_url = f"http://{host}:{port}"
         self._ensure_collection()
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    # -- Internal -------------------------------------------------------------
 
-    def _ensure_collection(self):
-        existing = [c.name for c in self.client.get_collections().collections]
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method=method,
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            content = response.read().decode("utf-8")
+            return json.loads(content) if content else {}
+
+    def _filter(self, key: str, value) -> dict:
+        return {
+            "must": [
+                {
+                    "key": key,
+                    "match": {"value": value},
+                }
+            ]
+        }
+
+    def _ensure_collection(self) -> None:
+        collections = self._request("GET", "/collections")
+        existing = [
+            item["name"]
+            for item in collections.get("result", {}).get("collections", [])
+        ]
+
         if self.collection_name not in existing:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=self.embedding_size,
-                    distance=Distance.COSINE,
-                ),
+            self._request(
+                "PUT",
+                f"/collections/{self.collection_name}",
+                {
+                    "vectors": {
+                        "size": self.embedding_size,
+                        "distance": "Cosine",
+                    }
+                },
             )
-            logger.info(f"Created collection: '{self.collection_name}'")
-        else:
-            info  = self.client.get_collection(self.collection_name)
-            count = info.points_count or 0
-            logger.info(
-                f"Connected to collection: '{self.collection_name}' | points: {count}"
-            )
+            logger.info("Created collection: '%s'", self.collection_name)
+            return
+
+        info = self._request("GET", f"/collections/{self.collection_name}")
+        count = info.get("result", {}).get("points_count") or 0
+        logger.info(
+            "Connected to collection: '%s' | points: %s",
+            self.collection_name,
+            count,
+        )
 
     def _next_id(self) -> int:
-        return self.client.count(self.collection_name).count
+        return self.count()
 
-    # ── Write ─────────────────────────────────────────────────────────────────
+    # -- Write ----------------------------------------------------------------
 
     def add(
         self,
         embedding: np.ndarray,
         name: str,
-        fingerprint_position: int = -1,   # idx AS608, -1 = chưa enroll vân tay
+        fingerprint_position: int = -1,
     ) -> None:
-        """
-        Thêm 1 embedding vào collection.
-
-        Args:
-            embedding:            vector khuôn mặt (512-d).
-            name:                 tên người.
-            fingerprint_position: vị trí template trong AS608 (-1 nếu chưa có).
-        """
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=[PointStruct(
-                id=self._next_id(),
-                vector=embedding.tolist(),
-                payload={
-                    "name":                 name,
-                    "fingerprint_position": fingerprint_position,
-                },
-            )],
+        self._request(
+            "PUT",
+            f"/collections/{self.collection_name}/points?wait=true",
+            {
+                "points": [
+                    {
+                        "id": self._next_id(),
+                        "vector": embedding.tolist(),
+                        "payload": {
+                            "name": name,
+                            "fingerprint_position": fingerprint_position,
+                        },
+                    }
+                ]
+            },
         )
         logger.info(
-            f"Added: '{name}' | fingerprint_position={fingerprint_position}"
+            "Added: '%s' | fingerprint_position=%s",
+            name,
+            fingerprint_position,
         )
 
     def add_batch(
@@ -83,43 +115,39 @@ class Qdrant_db:
         names: list[str],
         fingerprint_positions: list[int] | None = None,
     ) -> None:
-        """
-        Thêm nhiều embedding cùng lúc.
-
-        Args:
-            fingerprint_positions: list idx AS608 tương ứng; None → toàn bộ là -1.
-        """
         if fingerprint_positions is None:
             fingerprint_positions = [-1] * len(names)
 
         offset = self._next_id()
         points = [
-            PointStruct(
-                id=offset + i,
-                vector=emb.tolist(),
-                payload={
-                    "name":                 name,
+            {
+                "id": offset + i,
+                "vector": emb.tolist(),
+                "payload": {
+                    "name": name,
                     "fingerprint_position": fp_pos,
                 },
-            )
+            }
             for i, (emb, name, fp_pos) in enumerate(
                 zip(embeddings, names, fingerprint_positions)
             )
         ]
-        self.client.upsert(collection_name=self.collection_name, points=points)
-        logger.info(f"Added batch: {len(points)} faces")
+        self._request(
+            "PUT",
+            f"/collections/{self.collection_name}/points?wait=true",
+            {"points": points},
+        )
+        logger.info("Added batch: %s faces", len(points))
 
     def delete(self, name: str) -> None:
-        """Xóa tất cả vector theo tên."""
-        self.client.delete(
-            collection_name=self.collection_name,
-            points_selector=Filter(
-                must=[FieldCondition(key="name", match=MatchValue(value=name))]
-            ),
+        self._request(
+            "POST",
+            f"/collections/{self.collection_name}/points/delete?wait=true",
+            {"filter": self._filter("name", name)},
         )
-        logger.info(f"Deleted: '{name}'")
+        logger.info("Deleted: '%s'", name)
 
-    # ── Read ──────────────────────────────────────────────────────────────────
+    # -- Read -----------------------------------------------------------------
 
     def search(
         self,
@@ -127,178 +155,118 @@ class Qdrant_db:
         top_k: int = 1,
         threshold: float = 0.4,
     ) -> list[tuple[str, float, int]]:
-        """
-        Tìm kiếm khuôn mặt gần nhất.
-
-        Returns:
-            List các tuple (name, score, fingerprint_position).
-            Trả về [("Unknown", 0.0, -1)] khi không tìm thấy.
-        """
         if self.is_empty():
             logger.warning("Collection rỗng, không thể search.")
             return [("Unknown", 0.0, -1)]
 
-        hits = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=embedding.tolist(),
-            limit=top_k,
-            with_payload=True,
+        response = self._request(
+            "POST",
+            f"/collections/{self.collection_name}/points/search",
+            {
+                "vector": embedding.tolist(),
+                "limit": top_k,
+                "with_payload": True,
+            },
         )
+        hits = response.get("result", [])
 
         if not hits:
             return [("Unknown", 0.0, -1)]
 
         filtered = [
             (
-                h.payload.get("name", "Unknown"),
-                float(h.score),
-                int(h.payload.get("fingerprint_position", -1)),
+                hit.get("payload", {}).get("name", "Unknown"),
+                float(hit.get("score", 0.0)),
+                int(hit.get("payload", {}).get("fingerprint_position", -1)),
             )
-            for h in hits
-            if h.score >= threshold
+            for hit in hits
+            if hit.get("score", 0.0) >= threshold
         ]
 
-        return filtered if filtered else [("Unknown", 0.0, -1)]
+        if filtered:
+            return filtered
 
-    def search_or_enroll(
+        return [("Unknown", float(hits[0].get("score", 0.0)), -1)]
+
+    # -- Utils ----------------------------------------------------------------
+
+    def _scroll(
         self,
-        embedding: np.ndarray,
-        threshold: float = 0.4,
-        fingerprint_position: int = -1,
-    ) -> tuple[str, float, int]:
-        """
-        Tìm khuôn mặt. Nếu không có trong DB → hỏi user qua terminal
-        và enroll nếu được đồng ý.
+        scroll_filter: dict | None = None,
+        limit: int = 1,
+    ) -> list[dict]:
+        body = {
+            "limit": limit,
+            "with_payload": True,
+            "with_vector": False,
+        }
+        if scroll_filter is not None:
+            body["filter"] = scroll_filter
 
-        Args:
-            embedding:            vector khuôn mặt cần tìm.
-            threshold:            ngưỡng cosine similarity.
-            fingerprint_position: idx vân tay AS608 đã enroll (-1 nếu chưa có).
-
-        Returns:
-            Tuple (name, score, fingerprint_position) của kết quả cuối cùng.
-        """
-        results = self.search(embedding, top_k=1, threshold=threshold)
-        name, score, fp_pos = results[0]
-
-        if name != "Unknown":
-            logger.info(f"Nhận diện: '{name}' (score={score:.3f}, fp_pos={fp_pos})")
-            return name, score, fp_pos
-
-        # ── Không tìm thấy → hỏi enroll ──────────────────────────────────
-        print(f"\n[DB] Khuôn mặt lạ (best score={score:.3f} < threshold={threshold})")
-        ans = input("Enroll khuôn mặt này không? (y/n): ").strip().lower()
-
-        if ans != "y":
-            print("[DB] Bỏ qua enroll.")
-            return "Unknown", 0.0, -1
-
-        new_name = input("Nhập tên: ").strip()
-        if not new_name:
-            print("[DB] Tên rỗng, bỏ qua.")
-            return "Unknown", 0.0, -1
-
-        # Hỏi fingerprint position nếu chưa truyền vào
-        if fingerprint_position == -1:
-            fp_input = input(
-                "Nhập vị trí vân tay trong AS608 (-1 nếu chưa enroll): "
-            ).strip()
-            try:
-                fingerprint_position = int(fp_input)
-            except ValueError:
-                fingerprint_position = -1
-
-        self.add(embedding, new_name, fingerprint_position)
-        print(
-            f"[DB] Đã lưu '{new_name}' "
-            f"(fingerprint_position={fingerprint_position})"
+        response = self._request(
+            "POST",
+            f"/collections/{self.collection_name}/points/scroll",
+            body,
         )
-        return new_name, 1.0, fingerprint_position
-
-    # ── Utils ─────────────────────────────────────────────────────────────────
+        return response.get("result", {}).get("points", [])
 
     def get_name_by_fp_position(self, fp_position: int) -> str:
-        """
-        Tra tên người theo fingerprint_position (slot AS608).
-        Trả về "Unknown" nếu không tìm thấy.
-        """
         if fp_position < 0:
             return "Unknown"
 
-        results, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(
-                    key="fingerprint_position",
-                    match=MatchValue(value=fp_position),
-                )]
-            ),
+        results = self._scroll(
+            scroll_filter=self._filter("fingerprint_position", fp_position),
             limit=1,
-            with_payload=True,
-            with_vectors=False,
         )
         if not results:
             return "Unknown"
-        return results[0].payload.get("name", "Unknown")
+        return results[0].get("payload", {}).get("name", "Unknown")
 
     def get_fingerprint_position(self, name: str) -> int:
-        """
-        Lấy fingerprint_position đã lưu của một người theo tên.
-        Trả về -1 nếu không tìm thấy.
-        """
-        results, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="name", match=MatchValue(value=name))]
-            ),
+        results = self._scroll(
+            scroll_filter=self._filter("name", name),
             limit=1,
-            with_payload=True,
-            with_vectors=False,
         )
         if not results:
             return -1
-        return int(results[0].payload.get("fingerprint_position", -1))
+        return int(results[0].get("payload", {}).get("fingerprint_position", -1))
 
     def count(self) -> int:
-        return self.client.count(self.collection_name).count
+        response = self._request(
+            "POST",
+            f"/collections/{self.collection_name}/points/count",
+            {"exact": True},
+        )
+        return int(response.get("result", {}).get("count", 0))
 
     def list_names(self) -> list[str]:
-        """Danh sách tên unique trong collection."""
-        results, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            limit=10_000,
-            with_payload=True,
-            with_vectors=False,
-        )
-        names = list({r.payload.get("name") for r in results if r.payload})
-        return sorted(names)
+        results = self._scroll(limit=10_000)
+        names = {
+            item.get("payload", {}).get("name")
+            for item in results
+            if item.get("payload")
+        }
+        return sorted(name for name in names if name)
 
     def list_all(self) -> list[dict]:
-        """
-        Trả về toàn bộ records dạng list dict:
-        [{"id": int, "name": str, "fingerprint_position": int}, ...]
-        """
-        results, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            limit=10_000,
-            with_payload=True,
-            with_vectors=False,
-        )
+        results = self._scroll(limit=10_000)
         return [
             {
-                "id":                   r.id,
-                "name":                 r.payload.get("name", ""),
-                "fingerprint_position": r.payload.get("fingerprint_position", -1),
+                "id": item.get("id"),
+                "name": item.get("payload", {}).get("name", ""),
+                "fingerprint_position": item.get("payload", {}).get(
+                    "fingerprint_position",
+                    -1,
+                ),
             }
-            for r in results
-            if r.payload
+            for item in results
+            if item.get("payload")
         ]
 
     def clear(self) -> None:
-        """Xóa toàn bộ data, giữ lại collection."""
-        self.client.delete_collection(self.collection_name)
+        self._request("DELETE", f"/collections/{self.collection_name}")
         self._ensure_collection()
-        logger.info(f"Cleared collection: '{self.collection_name}'")
+        logger.info("Cleared collection: '%s'", self.collection_name)
 
     def is_empty(self) -> bool:
         return self.count() == 0

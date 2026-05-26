@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rollcall Status</title>
+    <style>
+        :root {
+            --accent: #2068c9;
+            --bg: #101418;
+            --fg: #f8f9fa;
+            --muted: #aeb8c2;
+        }
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: var(--bg);
+            color: var(--fg);
+            font-family: Arial, Helvetica, sans-serif;
+            cursor: none;
+        }
+        .screen {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .bar {
+            min-height: 12vh;
+            background: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 4vw;
+            font-size: clamp(12px, 3vw, 22px);
+            font-weight: 700;
+        }
+        .content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 3vh 5vw;
+            gap: 1vh;
+        }
+        .status {
+            font-size: clamp(22px, 9vw, 44px);
+            line-height: 1.05;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .message {
+            color: var(--fg);
+            font-size: clamp(12px, 4.5vw, 22px);
+            line-height: 1.18;
+            font-weight: 700;
+        }
+        .meta {
+            color: var(--muted);
+            font-size: clamp(10px, 3.4vw, 16px);
+            line-height: 1.2;
+        }
+        .footer {
+            height: 2vh;
+            margin: 0 5vw 3vh;
+            background: var(--accent);
+        }
+    </style>
+</head>
+<body>
+    <div class="screen">
+        <div class="bar">
+            <span>ROLLCALL</span>
+            <span id="clock">--:--</span>
+        </div>
+        <main class="content">
+            <div id="status" class="status">READY</div>
+            <div id="message" class="message">Dang khoi dong</div>
+            <div id="name" class="meta">-</div>
+            <div id="note" class="meta">-</div>
+        </main>
+        <div class="footer"></div>
+    </div>
+
+    <script>
+        const colors = {
+            idle: '#2068c9',
+            ok: '#198754',
+            review: '#f0ad00',
+            denied: '#dc3545',
+            error: '#dc3545'
+        };
+
+        function setAccent(color) {
+            document.documentElement.style.setProperty('--accent', color);
+        }
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent =
+                String(now.getHours()).padStart(2, '0') + ':' +
+                String(now.getMinutes()).padStart(2, '0');
+        }
+
+        async function refreshStatus() {
+            try {
+                const response = await fetch('/api/status', {cache: 'no-store'});
+                if (!response.ok) throw new Error('status failed');
+                const data = await response.json();
+                setAccent(colors[data.state] || colors.idle);
+                document.getElementById('status').textContent = data.status_label || data.label || 'READY';
+                document.getElementById('message').textContent = data.message || '-';
+                document.getElementById('name').textContent = data.name || '-';
+                document.getElementById('note').textContent = data.note || data.time || '-';
+            } catch (error) {
+                setAccent(colors.error);
+                document.getElementById('status').textContent = 'LOI';
+                document.getElementById('message').textContent = 'Mat ket noi server';
+                document.getElementById('name').textContent = '-';
+                document.getElementById('note').textContent = '-';
+            }
+        }
+
+        updateClock();
+        refreshStatus();
+        setInterval(updateClock, 1000);
+        setInterval(refreshStatus, 1500);
+    </script>
+</body>
+</html>

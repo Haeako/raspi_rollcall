@@ -1,35 +1,17 @@
-"""
-main_pipeline_sync.py
----------------------
-
-Synchronous 1-1 biometric pipeline with State Machine.
-
-Flow (State Machine):
-    IDLE -> WAIT_FACE -> ENROLL -> IDLE
-    IDLE -> WAIT_FACE -> WAIT_FP -> VERIFY -> IDLE
-
-Workers:
-    FaceWorker         : captures only when requested
-    FingerprintWorker  : scans only when requested
-
-IPC:
-    Face uses Event + response Queue(maxsize=1)
-    Fingerprint uses command Queue(maxsize=1) + response Queue(maxsize=1)
-"""
+"""Synchronous face + fingerprint rollcall pipeline."""
 
 import sys
 import time
 import json
 import logging
+import os
 import queue
+from datetime import datetime
 from enum import Enum, auto
 from multiprocessing import Process, Queue, Event
 from pathlib import Path
 
-# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Import core components with error handling
 
 from core import (
     PiCamera,
@@ -41,21 +23,13 @@ from core import (
     get_config_path,
     ensure_capture_dir,
 )
-
-# =============================================================================
-# ENUMS
-# =============================================================================
+from attendance_store import init_attendance_db, record_attendance, record_pending_face
 
 class PipelineState(Enum):
     IDLE = auto()
     WAIT_FACE = auto()
-    ENROLL = auto()
     WAIT_FP = auto()
     VERIFY = auto()
-
-# =============================================================================
-# LOGGING
-# =============================================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,14 +38,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-
 CONFIG_PATH = get_config_path()
 
 DEFAULT_CONFIG = {
-    "mode": "both",      # face | fingerprint | both
     "trigger": "sensor",
 
     # Sensor
@@ -79,15 +48,17 @@ DEFAULT_CONFIG = {
     "sensor_cooldown": 3.0,
 
     # Face
+    "camera_width": 320,
+    "camera_height": 240,
+    "camera_framerate": 10,
+    "camera_buffer_count": 2,
     "face_confidence_thresh": 0.5,
     "face_threshold": 0.4,
 
     # Timeout
     "face_timeout": 5.0,
     "fp_timeout": 10.0,
-    "fp_enroll_timeout": 30.0,
     "worker_startup_timeout": 90.0,
-    "idle_log_interval": 5.0,
 
     # Weights (just filenames, paths resolved by core)
     "det_weight": "det_10g.onnx",
@@ -98,8 +69,41 @@ DEFAULT_CONFIG = {
     "qdrant_port": 6333,
 }
 
-VALID_MODES = {"face", "fingerprint", "both"}
 VALID_TRIGGERS = {"sensor"}
+
+
+def save_attendance_capture(frame, bboxes=None, name="Unknown"):
+    """Save the captured frame used for face verification."""
+    import cv2
+
+    capture_dir = ensure_capture_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{timestamp}.jpg"
+    capture_path = capture_dir / filename
+
+    annotated = frame.copy()
+
+    if bboxes is not None and len(bboxes) > 0:
+        for bb in bboxes:
+            left, top, right, bottom = [int(x) for x in bb]
+            cv2.rectangle(annotated, (left, top), (right, bottom), (0, 180, 0), 2)
+            cv2.putText(
+                annotated,
+                name,
+                (max(left, 8), max(top - 8, 18)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 180, 0),
+                2,
+            )
+
+    cv2.imwrite(str(capture_path), annotated)
+    return filename
+
+
+def orient_frame(frame):
+    """Rotate camera frame 180 degrees before recognition and storage."""
+    return frame[::-1, ::-1].copy()
 
 
 def load_config(path=CONFIG_PATH):
@@ -116,12 +120,9 @@ def load_config(path=CONFIG_PATH):
     else:
         logger.info("No config file found, using defaults")
 
-    cfg["mode"] = str(cfg.get("mode", DEFAULT_CONFIG["mode"])).lower()
     cfg["trigger"] = str(cfg.get("trigger", DEFAULT_CONFIG["trigger"])).lower()
-
-    if cfg["mode"] not in VALID_MODES:
-        logger.warning("Invalid mode=%r, falling back to 'both'", cfg["mode"])
-        cfg["mode"] = "both"
+    cfg["qdrant_host"] = os.getenv("QDRANT_HOST", cfg["qdrant_host"])
+    cfg["qdrant_port"] = int(os.getenv("QDRANT_PORT", cfg["qdrant_port"]))
 
     if cfg["trigger"] not in VALID_TRIGGERS:
         logger.warning("Invalid trigger=%r, forcing 'sensor'", cfg["trigger"])
@@ -129,10 +130,6 @@ def load_config(path=CONFIG_PATH):
 
     return cfg
 
-
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
 
 def clear_queue(q):
     """Clear a queue without blocking."""
@@ -151,38 +148,13 @@ def request_face_capture(request_event, response_queue, logger):
     return time.time()
 
 
-def request_fingerprint_scan(request_queue, response_queue, logger):
-    """Request fingerprint scan from worker."""
+def request_fingerprint(request_queue, response_queue, logger, action="search"):
+    """Request a fingerprint worker action."""
     clear_queue(request_queue)
     clear_queue(response_queue)
-    logger.info("Requesting fingerprint scan...")
-    request_queue.put({"action": "search"})
+    logger.info("Requesting fingerprint %s...", action)
+    request_queue.put({"action": action})
     return time.time()
-
-
-def request_fingerprint_enroll(request_queue, response_queue, logger):
-    """Request fingerprint enrollment from worker."""
-    clear_queue(request_queue)
-    clear_queue(response_queue)
-    logger.info("Requesting fingerprint enrollment...")
-    request_queue.put({"action": "enroll"})
-    return time.time()
-
-
-def wait_for_response(response_queue, timeout, logger, label):
-    """Wait for one worker response with a timeout."""
-    start = time.time()
-    while time.time() - start <= timeout:
-        try:
-            return response_queue.get_nowait()
-        except queue.Empty:
-            time.sleep(0.05)
-
-    logger.warning("%s timeout", label)
-    return {
-        "success": False,
-        "message": f"{label} timeout",
-    }
 
 
 def reset_session():
@@ -190,7 +162,6 @@ def reset_session():
     return {
         "face": None,
         "fingerprint": None,
-        "object_detected_at": 0.0,
         "face_requested_at": 0.0,
         "fp_requested_at": 0.0,
     }
@@ -204,71 +175,25 @@ def set_state(current_state, next_state, reason=""):
     return next_state
 
 
-def enroll_new_person(
-    embedding,
-    db,
-    mode="face",
-    fp_request=None,
-    fp_response=None,
-    cfg=None,
-):
+def status(title, *lines):
+    message = " | ".join(str(line) for line in lines if line)
+    if message:
+        logger.info("STATUS %s | %s", title, message)
+    else:
+        logger.info("STATUS %s", title)
 
-    print("\n" + "=" * 50)
-    print("UNKNOWN FACE")
-    print("=" * 50)
-
-    if input("Enroll? (y/n): ").strip().lower() != "y":
-        return
-
-    name = input("Name: ").strip()
-
-    if not name:
-        print("Invalid name.")
-        return
-
-    fp_position = -1
-
-    if mode == "both" and fp_request is not None and fp_response is not None:
-        print("Place finger on sensor to enroll fingerprint...")
-        request_fingerprint_enroll(fp_request, fp_response, logger)
-        fp_result = wait_for_response(
-            fp_response,
-            cfg["fp_enroll_timeout"] if cfg else DEFAULT_CONFIG["fp_enroll_timeout"],
-            logger,
-            "Fingerprint enrollment",
-        )
-
-        if fp_result["success"]:
-            fp_position = fp_result["position"]
-            print(f"Fingerprint stored at slot #{fp_position}")
-        else:
-            print(f"Fingerprint enroll failed: {fp_result['message']}")
-
-            if input("Save face only? (y/n): ").strip().lower() != "y":
-                return
-
-    db.add(
-        embedding,
-        name,
-        fingerprint_position=fp_position
-    )
-
-    print(
-        f"Enroll success: "
-        f"{name} (fp_slot={fp_position})"
-    )
-
-
-# =============================================================================
-# FACE WORKER
-# =============================================================================
 
 def face_worker(request_event, response_queue, stop_event, ready_event, cfg):
     """Face detection and recognition worker process."""
     logger.info("Face worker started.")
 
     try:
-        camera = PiCamera()
+        camera = PiCamera(
+            width=int(cfg["camera_width"]),
+            height=int(cfg["camera_height"]),
+            framerate=int(cfg["camera_framerate"]),
+            buffer_count=int(cfg["camera_buffer_count"]),
+        )
     except Exception as e:
         logger.error(f"Camera initialization failed: {e}")
         return
@@ -298,17 +223,16 @@ def face_worker(request_event, response_queue, stop_event, ready_event, cfg):
 
     try:
         while not stop_event.is_set():
-            # Wait for request
             if not request_event.wait(timeout=0.1):
                 continue
 
             request_event.clear()
 
             try:
-                frame = camera.capture_array()
+                frame = orient_frame(camera.capture_array())
                 embs, bbs, confs = model.get_embeding_vector(
                     frame,
-                    image_format="BGR",
+                    image_format="RGB",
                 )
 
                 if len(embs) == 0:
@@ -318,12 +242,10 @@ def face_worker(request_event, response_queue, stop_event, ready_event, cfg):
                     })
                     continue
 
-                # Get best match
                 best_idx = int(confs.argmax()) if hasattr(confs, "argmax") else 0
                 best_emb = embs[best_idx]
                 best_conf = float(confs[best_idx])
 
-                # Search database
                 results = db.search(best_emb, top_k=1, threshold=threshold)
 
                 if results:
@@ -331,12 +253,19 @@ def face_worker(request_event, response_queue, stop_event, ready_event, cfg):
                 else:
                     name, score, fp_pos = "Unknown", 0.0, -1
 
+                capture_path = save_attendance_capture(
+                    frame,
+                    bboxes=[bbs[best_idx]],
+                    name=name,
+                )
+
                 response_queue.put({
                     "success": True,
                     "name": name,
                     "score": score,
                     "confidence": best_conf,
                     "fp_pos": fp_pos,
+                    "capture_path": capture_path,
                     "embedding": best_emb,
                     "ts": time.time(),
                 })
@@ -352,10 +281,6 @@ def face_worker(request_event, response_queue, stop_event, ready_event, cfg):
         camera.close()
         logger.info("Face worker stopped.")
 
-
-# =============================================================================
-# FINGERPRINT WORKER
-# =============================================================================
 
 def fingerprint_worker(request_queue, response_queue, stop_event, ready_event, cfg):
     """Fingerprint scanning worker process."""
@@ -378,11 +303,13 @@ def fingerprint_worker(request_queue, response_queue, stop_event, ready_event, c
                 continue
 
             action = request.get("action", "search")
-
             try:
                 if action == "enroll":
-                    result = sensor.enroll(timeout=cfg["fp_enroll_timeout"])
+                    result = sensor.enroll(timeout=cfg["fp_timeout"])
+                elif action == "delete":
+                    result = sensor.delete(int(request.get("position", -1)))
                 else:
+                    action = "search"
                     result = sensor.search(timeout=cfg["fp_timeout"])
 
                 if result.success:
@@ -415,24 +342,15 @@ def fingerprint_worker(request_queue, response_queue, stop_event, ready_event, c
         logger.info("Fingerprint worker stopped.")
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 def main():
     """Main pipeline orchestrator."""
-    # Use spawn to ensure clean child processes
     import multiprocessing as mp
     mp.set_start_method("spawn", force=True)
 
     cfg = load_config()
-    mode = "both"
+    init_attendance_db()
     logger.info("Pipeline initializing...")
     logger.info("Flow: HW-201 -> face -> fingerprint -> fuzzy -> result")
-
-    # -------------------------------------------------------------------------
-    # Trigger sensor initialization
-    # -------------------------------------------------------------------------
 
     trigger = cfg["trigger"]
     sensor = None
@@ -443,11 +361,8 @@ def main():
             logger.info("HW-201 sensor ready.")
         except Exception as e:
             logger.error(f"HW-201 initialization failed: {e}")
+            status("ERROR", "Khong khoi tao duoc cam bien", str(e))
             return
-
-    # -------------------------------------------------------------------------
-    # Initialize IPC (Inter-Process Communication)
-    # -------------------------------------------------------------------------
 
     stop_event = Event()
 
@@ -459,10 +374,6 @@ def main():
     fp_response = Queue(maxsize=1)
     fp_ready = Event()
 
-    # -------------------------------------------------------------------------
-    # Initialize database and models
-    # -------------------------------------------------------------------------
-
     try:
         db = Qdrant_db(
             host=cfg["qdrant_host"],
@@ -471,6 +382,7 @@ def main():
         logger.info("Qdrant database connected.")
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
+        status("ERROR", "Khong ket noi duoc database", str(e))
         return
 
     fuzzy = None
@@ -479,17 +391,13 @@ def main():
         logger.info("Fuzzy model initialized.")
     except Exception as e:
         logger.error(f"Fuzzy model initialization failed: {e}")
+        status("ERROR", "Khong khoi tao duoc fuzzy model", str(e))
         return
 
-    # Ensure captures directory exists
     try:
         ensure_capture_dir()
     except Exception as e:
         logger.warning(f"Could not create captures directory: {e}")
-
-    # -------------------------------------------------------------------------
-    # Start worker processes
-    # -------------------------------------------------------------------------
 
     processes = []
 
@@ -534,30 +442,20 @@ def main():
             return
         logger.info("%s is ready.", worker_name)
 
-    # -------------------------------------------------------------------------
-    # Main state machine loop
-    # -------------------------------------------------------------------------
-
     cooldown = cfg["sensor_cooldown"]
     last_trigger = 0
 
     logger.info("✅ Pipeline running. Press Ctrl+C to stop.")
+    status("READY", "Dat nguoi vao cam bien", "Cho kich hoat")
 
     state = PipelineState.IDLE
     session = reset_session()
-    last_idle_log = 0.0
 
     try:
         while True:
             if state == PipelineState.IDLE:
-                # ==============================================================
-                # TRIGGER - HW-201 object detection only
-                # ==============================================================
                 if not sensor.detect():
                     now = time.time()
-                    if now - last_idle_log >= cfg["idle_log_interval"]:
-                        logger.info("STATE IDLE: waiting for HW-201 trigger on GPIO %s", cfg["sensor_pin"])
-                        last_idle_log = now
                     time.sleep(0.05)
                     continue
 
@@ -568,20 +466,18 @@ def main():
 
                 last_trigger = now
                 logger.info("📍 Sensor triggered")
+                status("SCANNING", "Da phat hien nguoi", "Dang quet khuon mat")
                 session = reset_session()
-                session["object_detected_at"] = now
                 session["face_requested_at"] = request_face_capture(face_request, face_response, logger)
                 state = set_state(state, PipelineState.WAIT_FACE, "sensor trigger")
 
             elif state == PipelineState.WAIT_FACE:
-                # ==============================================================
-                # WAIT FOR FACE RESULT
-                # ==============================================================
                 try:
                     face_data = face_response.get_nowait()
                     
                     if not face_data["success"]:
                         logger.warning(f"⚠️ Face detection failed: {face_data['message']}")
+                        status("FACE FAILED", "Khong nhan dien duoc mat", face_data["message"])
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "face failed")
                         continue
@@ -591,63 +487,84 @@ def main():
                     logger.info(f"👤 Face detected: {face_name}")
 
                     if face_name == "Unknown":
-                        state = set_state(state, PipelineState.ENROLL, "unknown face")
+                        logger.info("Unknown face; enrolling fingerprint before dashboard decision")
+                        status("PENDING", "Khuon mat moi", "Dang enroll van tay")
+                        session["fp_requested_at"] = request_fingerprint(
+                            fp_request,
+                            fp_response,
+                            logger,
+                            "enroll",
+                        )
+                        state = set_state(state, PipelineState.WAIT_FP, "unknown face")
                     else:
                         logger.info(f"👋 Hello {face_name}")
-                        session["fp_requested_at"] = request_fingerprint_scan(fp_request, fp_response, logger)
+                        status("FACE OK", face_name, "Dang quet van tay")
+                        session["fp_requested_at"] = request_fingerprint(
+                            fp_request,
+                            fp_response,
+                            logger,
+                        )
                         state = set_state(state, PipelineState.WAIT_FP, "face matched")
 
                 except queue.Empty:
                     if time.time() - session["face_requested_at"] > cfg["face_timeout"]:
                         logger.warning("⏱️ Face detection timeout")
+                        status("TIMEOUT", "Qua thoi gian quet mat", "Thu lai")
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "face timeout")
                     else:
                         time.sleep(0.05)
 
-            elif state == PipelineState.ENROLL:
-                # ==============================================================
-                # ENROLL NEW PERSON
-                # ==============================================================
-                enroll_new_person(
-                    session["face"]["embedding"],
-                    db,
-                    mode=mode,
-                    fp_request=fp_request,
-                    fp_response=fp_response,
-                    cfg=cfg,
-                )
-                session = reset_session()
-                state = set_state(state, PipelineState.IDLE, "enroll complete")
-
             elif state == PipelineState.WAIT_FP:
-                # ==============================================================
-                # WAIT FOR FINGERPRINT RESULT
-                # ==============================================================
                 try:
                     fp_data = fp_response.get_nowait()
+                    face_data = session["face"]
                     
                     if not fp_data["success"]:
                         logger.warning(f"⚠️ Fingerprint failed: {fp_data['message']}")
+                        status("FINGERPRINT FAILED", "Khong khop van tay", fp_data["message"])
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "fingerprint failed")
                         continue
 
                     session["fingerprint"] = fp_data
+                    if face_data and face_data["name"] == "Unknown":
+                        fp_pos = fp_data.get("position", -1)
+                        status("PENDING", "Da enroll van tay", "Cho duyet tren dashboard")
+                        record_pending_face(
+                            embedding=face_data["embedding"],
+                            image_path=face_data.get("capture_path"),
+                            face_score=face_data.get("score"),
+                            face_confidence=face_data.get("confidence"),
+                            fingerprint_position=fp_pos,
+                            note="Waiting for dashboard approval",
+                        )
+                        record_attendance(
+                            name="Unknown",
+                            status="pending_unknown_face",
+                            image_path=face_data.get("capture_path"),
+                            face_score=face_data.get("score"),
+                            face_confidence=face_data.get("confidence"),
+                            fingerprint_score=fp_data.get("score"),
+                            note=f"Unknown face waiting for dashboard approval; fingerprint_position={fp_pos}",
+                        )
+                        session = reset_session()
+                        state = set_state(state, PipelineState.IDLE, "unknown face pending")
+                        continue
+
+                    status("VERIFYING", "Van tay da khop", "Dang xac minh")
                     state = set_state(state, PipelineState.VERIFY, "fingerprint matched")
 
                 except queue.Empty:
                     if time.time() - session["fp_requested_at"] > cfg["fp_timeout"]:
                         logger.warning("⏱️ Fingerprint scan timeout")
+                        status("TIMEOUT", "Qua thoi gian quet van tay", "Thu lai")
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "fingerprint timeout")
                     else:
                         time.sleep(0.05)
 
             elif state == PipelineState.VERIFY:
-                # ==============================================================
-                # VERIFY - Cross-check face and fingerprint
-                # ==============================================================
                 face_data = session["face"]
                 fp_data = session["fingerprint"]
 
@@ -662,20 +579,62 @@ def main():
 
                 if fp_name != face_name:
                     logger.warning(f"❌ BIOMETRIC MISMATCH (face={face_name}, fp={fp_name})")
+                    status("DENIED", face_name, f"Van tay thuoc {fp_name}")
+                    record_attendance(
+                        name=face_name,
+                        status="denied",
+                        image_path=face_data.get("capture_path"),
+                        face_score=face_data.get("score"),
+                        face_confidence=face_conf,
+                        fingerprint_score=fp_score,
+                        note=f"Fingerprint belongs to {fp_name}",
+                    )
                     print("\n❌ ACCESS DENIED - Biometric mismatch\n")
                     session = reset_session()
                     state = set_state(state, PipelineState.IDLE, "biometric mismatch")
                     continue
 
-                # Make fuzzy decision
                 decision = fuzzy.make_decision(fp_score, face_conf)
                 logger.info(f"🧠 Fuzzy decision: {decision:.3f}")
 
                 if decision >= 0.6:
+                    status("GRANTED", face_name, f"Decision {decision:.3f}")
+                    record_attendance(
+                        name=face_name,
+                        status="success",
+                        image_path=face_data.get("capture_path"),
+                        face_score=face_data.get("score"),
+                        face_confidence=face_conf,
+                        fingerprint_score=fp_score,
+                        decision=decision,
+                        note="Access granted",
+                    )
                     print(f"\n✅ ACCESS GRANTED\n👋 Welcome {face_name}!\n")
                 elif decision >= 0.4:
+                    status("REVIEW", face_name, f"Decision {decision:.3f}", "Can xac minh")
+                    record_attendance(
+                        name=face_name,
+                        status="manual_review",
+                        image_path=face_data.get("capture_path"),
+                        face_score=face_data.get("score"),
+                        face_confidence=face_conf,
+                        fingerprint_score=fp_score,
+                        decision=decision,
+                        note="Manual verification needed",
+                    )
                     print(f"\n⚠️ UNCERTAIN\nManual verification needed.\n")
                 else:
+                    status("DENIED", face_name, f"Decision {decision:.3f}", "Do tin cay thap")
+                    record_attendance(
+                        name=face_name,
+                        status="denied",
+                        image_path=face_data.get("capture_path"),
+                        face_score=face_data.get("score"),
+                        face_confidence=face_conf,
+                        fingerprint_score=fp_score,
+                        decision=decision,
+                        note="Low confidence",
+                    )
                     print(f"\n❌ ACCESS DENIED\nLow confidence.\n")
 
                 session = reset_session()
@@ -683,12 +642,11 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("🛑 Stopping pipeline...")
+        status("STOPPING", "Dang dung he thong")
 
     finally:
-        # Clean shutdown
         stop_event.set()
 
-        # Wait for workers to finish
         for p in processes:
             p.join(timeout=5)
 
@@ -697,7 +655,6 @@ def main():
                 p.terminate()
                 p.join()
 
-        # Clean up hardware
         if sensor:
             try:
                 sensor.clean()
@@ -705,11 +662,8 @@ def main():
                 logger.error(f"Error cleaning sensor: {e}")
 
         logger.info("✅ Shutdown complete.")
+        status("STOPPED", "He thong da dung")
 
-
-# =============================================================================
-# ENTRY
-# =============================================================================
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Rollcall Status Screen
+Exec=chromium --kiosk --no-first-run --disable-session-crashed-bubble --disable-infobars --password-store=basic --user-data-dir=/home/raspi/.cache/rollcall-chromium http://127.0.0.1:5000/status-screen
+X-GNOME-Autostart-enabled=true
