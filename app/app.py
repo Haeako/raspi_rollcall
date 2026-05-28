@@ -103,7 +103,7 @@ def save_attendance_capture(frame, bboxes=None, name="Unknown"):
 
 def orient_frame(frame):
     """Rotate camera frame 180 degrees before recognition and storage."""
-    return frame[::-1, ::-1].copy()
+    return frame[::-1].copy()
 
 
 def load_config(path=CONFIG_PATH):

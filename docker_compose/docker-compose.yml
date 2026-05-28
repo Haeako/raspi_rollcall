@@ -20,8 +20,8 @@ services:
     container_name: backend
 
     working_dir: /workspace/raspi_rollcall
-    command: tail -f /dev/null
-
+    # command: tail -f /dev/null
+    command: python3 server.py
     privileged: true
 
     ipc: host
