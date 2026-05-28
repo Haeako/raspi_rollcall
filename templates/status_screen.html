@@ -182,13 +182,15 @@
         }
 
         function updateClock() {
+            const clock = document.getElementById('clock');
+            if (!clock) return;
             const now = new Date();
-            document.getElementById('clock').textContent =
+            clock.textContent =
                 String(now.getHours()).padStart(2, '0') + ':' +
                 String(now.getMinutes()).padStart(2, '0');
         }
 
-        let latestShownId = null;
+        let latestShownKey = null;
         let idleTimer = null;
         let showingIdle = true;
 
@@ -207,6 +209,17 @@
             document.getElementById('note').textContent = data.note || data.time || '-';
         }
 
+        function getResultKey(data) {
+            return [
+                data.latest_id,
+                data.status,
+                data.decision,
+                data.note,
+                data.time,
+                data.name
+            ].join('|');
+        }
+
         function scheduleIdle() {
             if (idleTimer) {
                 clearTimeout(idleTimer);
@@ -220,13 +233,15 @@
                 if (!response.ok) throw new Error('status failed');
                 const data = await response.json();
                 if (!data.latest_id) {
+                    latestShownKey = null;
                     if (showingIdle) return;
                     displayIdle();
                     return;
                 }
 
-                if (data.latest_id !== latestShownId) {
-                    latestShownId = data.latest_id;
+                const resultKey = getResultKey(data);
+                if (resultKey !== latestShownKey) {
+                    latestShownKey = resultKey;
                     displayResult(data);
                     scheduleIdle();
                 }
