@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rollcall Idle</title>
+    <style>
+        :root {
+            --accent: #2068c9;
+            --bg: #101418;
+            --fg: #f8f9fa;
+            --muted: #aeb8c2;
+        }
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: var(--bg);
+            color: var(--fg);
+            font-family: Arial, Helvetica, sans-serif;
+            cursor: none;
+        }
+        .screen {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .bar {
+            min-height: 12vh;
+            background: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 4vw;
+            font-size: clamp(6px, 1.5vw, 11px);
+            font-weight: 700;
+        }
+        .content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 3vh 5vw;
+            gap: 1vh;
+        }
+        .status {
+            font-size: clamp(11px, 4.5vw, 22px);
+            line-height: 1.05;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+        .message {
+            color: var(--fg);
+            font-size: clamp(6px, 2.25vw, 11px);
+            line-height: 1.18;
+            font-weight: 700;
+        }
+        .meta {
+            color: var(--muted);
+            font-size: clamp(5px, 1.7vw, 8px);
+            line-height: 1.2;
+        }
+        .footer {
+            height: 2vh;
+            margin: 0 5vw 3vh;
+            background: var(--accent);
+        }
+    </style>
+</head>
+<body>
+    <div class="screen">
+        <div class="bar">
+            <span>ROLLCALL</span>
+            <span id="clock">--:--</span>
+        </div>
+        <main class="content">
+            <div class="status">READY</div>
+            <div class="message">Dat nguoi vao cam bien de bat dau diem danh.</div>
+            <div class="meta">Trang thai: idle</div>
+            <div class="meta">Cho quet mat hoac van tay</div>
+        </main>
+        <div class="footer"></div>
+    </div>
+
+    <script>
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').textContent =
+                String(now.getHours()).padStart(2, '0') + ':' +
+                String(now.getMinutes()).padStart(2, '0');
+        }
+
+        updateClock();
+        setInterval(updateClock, 1000);
+    </script>
+</body>
+</html>

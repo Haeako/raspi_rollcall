@@ -16,12 +16,24 @@ services:
       - app_network
 
   backend:
-    image: heaeko/dev_raspi:v5
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: raspi_rollcall_backend:tmux
     container_name: backend
 
     working_dir: /workspace/raspi_rollcall
     # command: tail -f /dev/null
-    command: python3 server.py
+    command: >
+      bash -lc '
+        if ! command -v tmux >/dev/null 2>&1; then
+          echo "tmux is not installed in the backend container image.";
+          echo "Install tmux in heaeko/dev_raspi:v5, then run docker compose up again.";
+          exit 127;
+        fi;
+        tmux new-session -d -s rollcall "cd /workspace/raspi_rollcall && python3 server.py";
+        tail -f /dev/null
+      '
     privileged: true
 
     ipc: host

@@ -10,6 +10,7 @@
             --bg: #101418;
             --fg: #f8f9fa;
             --muted: #aeb8c2;
+            --panel-scale: 0.5;
         }
         * {
             box-sizing: border-box;
@@ -25,10 +26,12 @@
             cursor: none;
         }
         .screen {
-            width: 100vw;
-            height: 100vh;
+            width: calc(100vw / var(--panel-scale));
+            height: calc(100vh / var(--panel-scale));
             display: flex;
             flex-direction: column;
+            transform: scale(var(--panel-scale));
+            transform-origin: top left;
         }
         .bar {
             min-height: 12vh;
@@ -65,6 +68,51 @@
             font-size: clamp(10px, 3.4vw, 16px);
             line-height: 1.2;
         }
+        .steps {
+            margin-top: 2vh;
+            display: grid;
+            gap: 1.2vh;
+            color: var(--fg);
+        }
+        .flow-title {
+            color: var(--muted);
+            font-size: clamp(10px, 2.4vw, 16px);
+            line-height: 1.2;
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+        .step {
+            display: grid;
+            grid-template-columns: 2.6em 1fr;
+            align-items: center;
+            gap: 0.8em;
+            font-size: clamp(10px, 2.8vw, 18px);
+            line-height: 1.25;
+            font-weight: 700;
+        }
+        .step-number {
+            width: 2.6em;
+            height: 2.6em;
+            border: 2px solid var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85em;
+            color: var(--fg);
+            background: rgba(255, 255, 255, 0.08);
+        }
+        .branch {
+            display: grid;
+            gap: 0.7vh;
+            padding-left: 0.5vw;
+            border-left: 3px solid var(--accent);
+        }
+        .branch-label {
+            color: var(--accent);
+            font-size: clamp(6px, 1.8vw, 10px);
+            line-height: 1.2;
+            font-weight: 800;
+        }
         .footer {
             height: 2vh;
             margin: 0 5vw 3vh;
@@ -83,6 +131,39 @@
             <div id="message" class="message">Dang khoi dong</div>
             <div id="name" class="meta">-</div>
             <div id="note" class="meta">-</div>
+            <section class="steps" aria-label="Rollcall steps">
+                <div class="flow-title">Cac buoc diem danh</div>
+                <div class="step">
+                    <span class="step-number">1</span>
+                    <span>Quet mat</span>
+                </div>
+                <div class="branch">
+                    <div class="branch-label">Neu khong thay trong DB</div>
+                    <div class="step">
+                        <span class="step-number">2</span>
+                        <span>Quet van tay</span>
+                    </div>
+                    <div class="step">
+                        <span class="step-number">3</span>
+                        <span>Quet lai khi duoc yeu cau</span>
+                    </div>
+                    <div class="step">
+                        <span class="step-number">4</span>
+                        <span>Doi quan tri vien xu ly</span>
+                    </div>
+                </div>
+                <div class="branch">
+                    <div class="branch-label">Neu da thay mat trong DB</div>
+                    <div class="step">
+                        <span class="step-number">2</span>
+                        <span>Quet van tay</span>
+                    </div>
+                    <div class="step">
+                        <span class="step-number">3</span>
+                        <span>Cho fuzzy decision</span>
+                    </div>
+                </div>
+            </section>
         </main>
         <div class="footer"></div>
     </div>
@@ -107,17 +188,53 @@
                 String(now.getMinutes()).padStart(2, '0');
         }
 
+        let latestShownId = null;
+        let idleTimer = null;
+        let showingIdle = true;
+
+        function displayIdle() {
+            showingIdle = true;
+            setAccent(colors.idle);
+            document.getElementById('status').textContent = 'READY';
+        }
+
+        function displayResult(data) {
+            showingIdle = false;
+            setAccent(colors[data.state] || colors.idle);
+            document.getElementById('status').textContent = data.status_label || data.label || 'READY';
+            document.getElementById('message').textContent = data.message || '-';
+            document.getElementById('name').textContent = data.name || '-';
+            document.getElementById('note').textContent = data.note || data.time || '-';
+        }
+
+        function scheduleIdle() {
+            if (idleTimer) {
+                clearTimeout(idleTimer);
+            }
+            idleTimer = setTimeout(displayIdle, 3000);
+        }
+
         async function refreshStatus() {
             try {
                 const response = await fetch('/api/status', {cache: 'no-store'});
                 if (!response.ok) throw new Error('status failed');
                 const data = await response.json();
-                setAccent(colors[data.state] || colors.idle);
-                document.getElementById('status').textContent = data.status_label || data.label || 'READY';
-                document.getElementById('message').textContent = data.message || '-';
-                document.getElementById('name').textContent = data.name || '-';
-                document.getElementById('note').textContent = data.note || data.time || '-';
+                if (!data.latest_id) {
+                    if (showingIdle) return;
+                    displayIdle();
+                    return;
+                }
+
+                if (data.latest_id !== latestShownId) {
+                    latestShownId = data.latest_id;
+                    displayResult(data);
+                    scheduleIdle();
+                }
             } catch (error) {
+                if (idleTimer) {
+                    clearTimeout(idleTimer);
+                }
+                showingIdle = false;
                 setAccent(colors.error);
                 document.getElementById('status').textContent = 'LOI';
                 document.getElementById('message').textContent = 'Mat ket noi server';
@@ -127,6 +244,7 @@
         }
 
         updateClock();
+        displayIdle();
         refreshStatus();
         setInterval(updateClock, 1000);
         setInterval(refreshStatus, 1500);

@@ -348,6 +348,11 @@ def status_screen():
     return render_template("status_screen.html")
 
 
+@app.route("/idle-screen")
+def idle_screen():
+    return render_template("idle_screen.html")
+
+
 @app.route("/api/stats")
 def attendance_stats():
     return jsonify(get_attendance_stats())
