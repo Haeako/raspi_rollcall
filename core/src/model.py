@@ -92,7 +92,7 @@ def draw_polyboxes(
 ) -> np.ndarray:
     """Draw face boxes and labels on a BGR frame."""
     for index, (box, confidence) in enumerate(zip(bbs, ccs)):
-        label = names[index] if names else "Unknown"
+        label = names[index] if names else "Unknown."
         color = (0, 255, 0) if label != "Unknown" else (0, 0, 255)
         left, top, right, bottom = [int(value) for value in box]
 
@@ -155,6 +155,10 @@ class FuzzyModel:
         self.decision["accept"] = fuzz.trapmf(self.decision.universe, [0.6, 0.8, 1, 1])
 
         rules = [
+            ctrl.Rule(
+                self.score["low"] & self.confidence["medium"],
+                self.decision["reject"],
+            )
             ctrl.Rule(
                 self.score["high"] & self.confidence["high"],
                 self.decision["accept"],
