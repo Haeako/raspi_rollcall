@@ -4,7 +4,7 @@ pandas
 numpy < 2.0
 keras_cv_attention_models
 glob2
-
+networkx
 tqdm
 scikit-learn
 scikit-image

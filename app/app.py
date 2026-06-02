@@ -162,6 +162,7 @@ def reset_session():
     return {
         "face": None,
         "fingerprint": None,
+        "fp_action": "search",
         "face_requested_at": 0.0,
         "fp_requested_at": 0.0,
     }
@@ -487,13 +488,13 @@ def main():
                     logger.info(f"👤 Face detected: {face_name}")
 
                     if face_name == "Unknown":
-                        logger.info("Unknown face; enrolling fingerprint before dashboard decision")
-                        status("PENDING", "Khuon mat moi", "Dang enroll van tay")
+                        logger.info("Unknown face; searching fingerprint before enrollment")
+                        status("VERIFYING", "Khuon mat la", "Dang kiem tra van tay")
+                        session["fp_action"] = "search_unknown"
                         session["fp_requested_at"] = request_fingerprint(
                             fp_request,
                             fp_response,
                             logger,
-                            "enroll",
                         )
                         state = set_state(state, PipelineState.WAIT_FP, "unknown face")
                     else:
@@ -521,6 +522,44 @@ def main():
                     face_data = session["face"]
                     
                     if not fp_data["success"]:
+                        if face_data and face_data["name"] == "Unknown" and session.get("fp_action") == "search_unknown":
+                            fp_score = fp_data.get("score", 0)
+                            face_conf = face_data.get("confidence", 0.0)
+                            decision = fuzzy.make_decision(fp_score, face_conf)
+                            decision_label = fuzzy.classify_decision(decision)
+                            logger.info(
+                                "Unknown face + fingerprint search failed: decision=%.3f (%s)",
+                                decision,
+                                decision_label,
+                            )
+
+                            if decision_label == "Reject":
+                                logger.info("Reject decision; enrolling unknown face as pending user")
+                                status("PENDING", "Nguoi moi", "Dang enroll van tay")
+                                session["fp_action"] = "enroll_unknown"
+                                session["fp_requested_at"] = request_fingerprint(
+                                    fp_request,
+                                    fp_response,
+                                    logger,
+                                    "enroll",
+                                )
+                                continue
+
+                            status("REVIEW", "Khuon mat la", f"Decision {decision:.3f}", "Can quet lai")
+                            record_attendance(
+                                name="Unknown",
+                                status="manual_review",
+                                image_path=face_data.get("capture_path"),
+                                face_score=face_data.get("score"),
+                                face_confidence=face_conf,
+                                fingerprint_score=fp_score,
+                                decision=decision,
+                                note="Unknown face but fuzzy decision is not reject; enrollment skipped",
+                            )
+                            session = reset_session()
+                            state = set_state(state, PipelineState.IDLE, "unknown face uncertain")
+                            continue
+
                         logger.warning(f"⚠️ Fingerprint failed: {fp_data['message']}")
                         status("FINGERPRINT FAILED", "Khong khop van tay", fp_data["message"])
                         session = reset_session()
@@ -529,6 +568,27 @@ def main():
 
                     session["fingerprint"] = fp_data
                     if face_data and face_data["name"] == "Unknown":
+                        if session.get("fp_action") == "search_unknown":
+                            fp_pos = fp_data.get("position", -1)
+                            fp_name = db.get_name_by_fp_position(fp_pos)
+                            logger.warning(
+                                "Unknown face but fingerprint belongs to %s; skipping enrollment",
+                                fp_name,
+                            )
+                            status("REVIEW", "Khuon mat la", f"Van tay thuoc {fp_name}", "Khong dang ki tu dong")
+                            record_attendance(
+                                name="Unknown",
+                                status="manual_review",
+                                image_path=face_data.get("capture_path"),
+                                face_score=face_data.get("score"),
+                                face_confidence=face_data.get("confidence"),
+                                fingerprint_score=fp_data.get("score"),
+                                note=f"Unknown face matched existing fingerprint_position={fp_pos}; enrollment skipped",
+                            )
+                            session = reset_session()
+                            state = set_state(state, PipelineState.IDLE, "unknown face matched fingerprint")
+                            continue
+
                         fp_pos = fp_data.get("position", -1)
                         status("PENDING", "Da enroll van tay", "Cho duyet tren dashboard")
                         record_pending_face(
@@ -597,7 +657,9 @@ def main():
                 decision = fuzzy.make_decision(fp_score, face_conf)
                 logger.info(f"🧠 Fuzzy decision: {decision:.3f}")
 
-                if decision >= 0.6:
+                decision_label = fuzzy.classify_decision(decision)
+
+                if decision_label == "Accept":
                     status("GRANTED", face_name, f"Decision {decision:.3f}")
                     record_attendance(
                         name=face_name,
@@ -610,7 +672,7 @@ def main():
                         note="Access granted",
                     )
                     print(f"\n✅ ACCESS GRANTED\n👋 Welcome {face_name}!\n")
-                elif decision >= 0.4:
+                elif decision_label == "Uncertain":
                     status("REVIEW", face_name, f"Decision {decision:.3f}", "Can xac minh")
                     record_attendance(
                         name=face_name,
