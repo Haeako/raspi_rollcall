@@ -122,14 +122,14 @@ class FuzzyModel:
         import skfuzzy as fuzz
         from skfuzzy import control as ctrl
 
-        self.score = ctrl.Antecedent(np.arange(0, 301, 1), "score")
-        self.confidence = ctrl.Antecedent(np.arange(0, 1.01, 0.01), "confidence")
-        self.decision = ctrl.Consequent(np.arange(0, 1.01, 0.01), "decision")
-
-        self.score["low"] = fuzz.trapmf(self.score.universe, [0, 0, 80, 140])
+        self.score["low"] = fuzz.trapmf(self.score.universe, [0, 0, 90, 170])
         self.score["medium"] = fuzz.trimf(self.score.universe, [100, 170, 240])
-        self.score["high"] = fuzz.trapmf(self.score.universe, [200, 250, 300, 300])
-
+        self.score["high"] = fuzz.trapmf(self.score.universe, [170, 230, 300, 300])
+        
+        self.confidence["low"] = fuzz.trapmf(self.confidence.universe, [0, 0, 0.30, 0.55])
+        self.confidence["medium"] = fuzz.trimf(self.confidence.universe, [0.35, 0.60, 0.85])
+        self.confidence["high"] = fuzz.trapmf(self.confidence.universe, [0.60, 0.75, 1.0, 1.0])
+        
         self.confidence["low"] = fuzz.trapmf(
             self.confidence.universe,
             [0, 0, 0.25, 0.45],
