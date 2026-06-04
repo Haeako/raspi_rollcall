@@ -121,39 +121,29 @@ class FuzzyModel:
     def __init__(self) -> None:
         import skfuzzy as fuzz
         from skfuzzy import control as ctrl
+        self.score = ctrl.Antecedent(np.arange(0, 301, 1), "score")
+        self.confidence = ctrl.Antecedent(np.arange(0, 1.01, 0.01), "confidence")
+        self.decision = ctrl.Consequent(np.arange(0, 1.01, 0.01), "decision")
 
-        self.score["low"] = fuzz.trapmf(self.score.universe, [0, 0, 90, 170])
-        self.score["medium"] = fuzz.trimf(self.score.universe, [100, 170, 240])
-        self.score["high"] = fuzz.trapmf(self.score.universe, [170, 230, 300, 300])
-        
-        self.confidence["low"] = fuzz.trapmf(self.confidence.universe, [0, 0, 0.30, 0.55])
-        self.confidence["medium"] = fuzz.trimf(self.confidence.universe, [0.35, 0.60, 0.85])
-        self.confidence["high"] = fuzz.trapmf(self.confidence.universe, [0.60, 0.75, 1.0, 1.0])
-        
-        self.confidence["low"] = fuzz.trapmf(
-            self.confidence.universe,
-            [0, 0, 0.25, 0.45],
-        )
-        self.confidence["medium"] = fuzz.trimf(
-            self.confidence.universe,
-            [0.35, 0.55, 0.75],
-        )
-        self.confidence["high"] = fuzz.trapmf(
-            self.confidence.universe,
-            [0.65, 0.8, 1, 1],
-        )
+        self.score["low"] = fuzz.trapmf(self.score.universe, [0, 0, 90, 170] )
+        self.score["medium"] = fuzz.trimf(self.score.universe, [90, 170, 240])
+        self.score["high"] = fuzz.trapmf(self.score.universe, [170, 240, 300, 300])
+
+        self.confidence["low"] = fuzz.trapmf(self.confidence.universe, [0.00, 0.00, 0.25, 0.50])
+        self.confidence["medium"] = fuzz.trimf( self.confidence.universe,[0.25, 0.50, 0.75],)
+        self.confidence["high"] = fuzz.trapmf(self.confidence.universe,[0.50, 0.75, 1.00, 1.00])
 
         self.decision["reject"] = fuzz.trapmf(
             self.decision.universe,
-            [0, 0, 0.2, 0.35],
+            [0.00, 0.00, 0.25, 0.50],
         )
         self.decision["uncertain"] = fuzz.trimf(
             self.decision.universe,
-            [0.25, 0.5, 0.75],
+            [0.25, 0.50, 0.75],
         )
         self.decision["accept"] = fuzz.trapmf(
             self.decision.universe,
-            [0.65, 0.8, 1, 1],
+            [0.50, 0.75, 1.00, 1.00],
         )
 
         rules = [
