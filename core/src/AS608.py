@@ -42,8 +42,10 @@ class AS608_HAL:
     def enroll(self, timeout: float = 0.0) -> FingerprintResult:
         """Enroll a new fingerprint with two scans."""
         try:
+            deadline = time.time() + timeout if timeout > 0 else None
+
             first_scan = self._wait_for_image(
-                timeout,
+                self._remaining_timeout(deadline),
                 "Timeout khi chờ vân tay lần 1.",
             )
             if not first_scan.success:
@@ -63,7 +65,7 @@ class AS608_HAL:
             time.sleep(2)
 
             second_scan = self._wait_for_image(
-                timeout,
+                self._remaining_timeout(deadline),
                 "Timeout khi chờ vân tay lần 2.",
             )
             if not second_scan.success:
@@ -137,6 +139,11 @@ class AS608_HAL:
 
     def count(self) -> int:
         return self.sensor.getTemplateCount()
+
+    def _remaining_timeout(self, deadline: float | None) -> float:
+        if deadline is None:
+            return 0.0
+        return max(0.01, deadline - time.time())
 
     def _wait_for_image(self, timeout: float, timeout_message: str) -> FingerprintResult:
         start_time = time.time()

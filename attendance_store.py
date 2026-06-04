@@ -8,6 +8,59 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 CAPTURES_DIR = DATA_DIR / "captures"
 ATTENDANCE_DB = DATA_DIR / "rollcall.db"
+REGISTRATION_REQUEST_PATH = DATA_DIR / "registration_request.json"
+
+
+def _write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    tmp_path.replace(path)
+
+
+def request_registration(db_path=ATTENDANCE_DB):
+    """Signal the running pipeline to start one dashboard registration flow."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    existing = get_registration_request()
+    if existing and existing.get("status") in {"requested", "running"}:
+        return existing
+
+    payload = {
+        "status": "requested",
+        "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "message": "Cho pipeline kich hoat dang ki.",
+    }
+    _write_json(REGISTRATION_REQUEST_PATH, payload)
+    return payload
+
+
+def get_registration_request():
+    if not REGISTRATION_REQUEST_PATH.exists():
+        return None
+
+    try:
+        with open(REGISTRATION_REQUEST_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def update_registration_request(status, message=None, **extra):
+    payload = get_registration_request() or {}
+    payload["status"] = status
+    payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if message is not None:
+        payload["message"] = message
+    payload.update(extra)
+    _write_json(REGISTRATION_REQUEST_PATH, payload)
+    return payload
+
+
+def has_active_registration_request():
+    payload = get_registration_request()
+    return bool(payload and payload.get("status") in {"requested", "running"})
 
 
 def init_attendance_db(db_path=ATTENDANCE_DB):

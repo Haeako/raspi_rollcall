@@ -23,7 +23,13 @@ from core import (
     get_config_path,
     ensure_capture_dir,
 )
-from attendance_store import init_attendance_db, record_attendance, record_pending_face
+from attendance_store import (
+    get_registration_request,
+    init_attendance_db,
+    record_attendance,
+    record_pending_face,
+    update_registration_request,
+)
 
 class PipelineState(Enum):
     IDLE = auto()
@@ -157,9 +163,18 @@ def request_fingerprint(request_queue, response_queue, logger, action="search"):
     return time.time()
 
 
+def clamp_fingerprint_score(score) -> float:
+    """Keep AS608 match scores in the fuzzy model's 0..300 range."""
+    try:
+        return max(0.0, min(float(score), FuzzyModel.SCORE_MAX))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def reset_session():
     """Return clean per-scan state."""
     return {
+        "mode": "rollcall",
         "face": None,
         "fingerprint": None,
         "fp_action": "search",
@@ -455,6 +470,19 @@ def main():
     try:
         while True:
             if state == PipelineState.IDLE:
+                registration_request = get_registration_request()
+                registration_active = bool(
+                    registration_request
+                    and registration_request.get("status") in {"requested", "running"}
+                )
+
+                if registration_active and registration_request.get("status") == "requested":
+                    update_registration_request(
+                        "running",
+                        "Cho HW-201 kich hoat de bat dau dang ki.",
+                    )
+                    status("REGISTER", "Dat nguoi vao cam bien", "Cho kich hoat HW")
+
                 if not sensor.detect():
                     now = time.time()
                     time.sleep(0.05)
@@ -466,11 +494,25 @@ def main():
                     continue
 
                 last_trigger = now
-                logger.info("📍 Sensor triggered")
-                status("SCANNING", "Da phat hien nguoi", "Dang quet khuon mat")
                 session = reset_session()
+                if registration_active:
+                    logger.info("📍 Dashboard registration triggered by HW-201")
+                    update_registration_request(
+                        "running",
+                        "Da kich hoat HW-201. Dang enroll khuon mat.",
+                    )
+                    status("REGISTER", "Da kich hoat HW", "Dang enroll khuon mat")
+                    session["mode"] = "registration"
+                else:
+                    logger.info("📍 Sensor triggered")
+                    status("SCANNING", "Da phat hien nguoi", "Dang quet khuon mat")
+
                 session["face_requested_at"] = request_face_capture(face_request, face_response, logger)
-                state = set_state(state, PipelineState.WAIT_FACE, "sensor trigger")
+                state = set_state(
+                    state,
+                    PipelineState.WAIT_FACE,
+                    "registration trigger" if registration_active else "sensor trigger",
+                )
 
             elif state == PipelineState.WAIT_FACE:
                 try:
@@ -479,6 +521,11 @@ def main():
                     if not face_data["success"]:
                         logger.warning(f"⚠️ Face detection failed: {face_data['message']}")
                         status("FACE FAILED", "Khong nhan dien duoc mat", face_data["message"])
+                        if session.get("mode") == "registration":
+                            update_registration_request(
+                                "failed",
+                                f"Enroll mat that bai: {face_data['message']}",
+                            )
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "face failed")
                         continue
@@ -486,6 +533,23 @@ def main():
                     session["face"] = face_data
                     face_name = face_data["name"]
                     logger.info(f"👤 Face detected: {face_name}")
+
+                    if session.get("mode") == "registration":
+                        logger.info("Registration face captured; enrolling fingerprint")
+                        update_registration_request(
+                            "running",
+                            "Da enroll mat. Dang enroll van tay trong 10 giay.",
+                        )
+                        status("REGISTER", "Da enroll mat", "Dang enroll van tay")
+                        session["fp_action"] = "enroll"
+                        session["fp_requested_at"] = request_fingerprint(
+                            fp_request,
+                            fp_response,
+                            logger,
+                            action="enroll",
+                        )
+                        state = set_state(state, PipelineState.WAIT_FP, "registration face captured")
+                        continue
 
                     if face_name == "Unknown":
                         logger.info("Unknown face; searching fingerprint before enrollment")
@@ -511,6 +575,11 @@ def main():
                     if time.time() - session["face_requested_at"] > cfg["face_timeout"]:
                         logger.warning("⏱️ Face detection timeout")
                         status("TIMEOUT", "Qua thoi gian quet mat", "Thu lai")
+                        if session.get("mode") == "registration":
+                            update_registration_request(
+                                "failed",
+                                "Timeout khi enroll mat.",
+                            )
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "face timeout")
                     else:
@@ -520,48 +589,88 @@ def main():
                 try:
                     fp_data = fp_response.get_nowait()
                     face_data = session["face"]
-                    
-                    if not fp_data["success"]:
-                        if face_data and face_data["name"] == "Unknown" and session.get("fp_action") == "search_unknown":
-                            fp_score = fp_data.get("score", 0)
-                            face_conf = face_data.get("confidence", 0.0)
-                            decision = fuzzy.make_decision(fp_score, face_conf)
-                            decision_label = fuzzy.classify_decision(decision)
-                            logger.info(
-                                "Unknown face + fingerprint search failed: decision=%.3f (%s)",
-                                decision,
-                                decision_label,
+
+                    if session.get("mode") == "registration":
+                        if not fp_data["success"]:
+                            logger.warning(
+                                "⚠️ Registration fingerprint enrollment failed: %s",
+                                fp_data.get("message"),
                             )
-
-                            if decision_label == "Reject":
-                                logger.info("Reject decision; enrolling unknown face as pending user")
-                                status("PENDING", "Nguoi moi", "Dang enroll van tay")
-                                session["fp_action"] = "enroll_unknown"
-                                session["fp_requested_at"] = request_fingerprint(
-                                    fp_request,
-                                    fp_response,
-                                    logger,
-                                    "enroll",
-                                )
-                                continue
-
-                            status("REVIEW", "Khuon mat la", f"Decision {decision:.3f}", "Can quet lai")
+                            status("REGISTER FAILED", "Enroll van tay that bai", fp_data.get("message"))
+                            update_registration_request(
+                                "failed",
+                                f"Enroll van tay that bai: {fp_data.get('message')}",
+                            )
                             record_attendance(
                                 name="Unknown",
-                                status="manual_review",
+                                status="denied",
                                 image_path=face_data.get("capture_path"),
                                 face_score=face_data.get("score"),
-                                face_confidence=face_conf,
-                                fingerprint_score=fp_score,
-                                decision=decision,
-                                note="Unknown face but fuzzy decision is not reject; enrollment skipped",
+                                face_confidence=face_data.get("confidence"),
+                                fingerprint_score=0.0,
+                                note=f"Dashboard registration failed: {fp_data.get('message')}",
                             )
                             session = reset_session()
-                            state = set_state(state, PipelineState.IDLE, "unknown face uncertain")
+                            state = set_state(state, PipelineState.IDLE, "registration fingerprint failed")
                             continue
 
-                        logger.warning(f"⚠️ Fingerprint failed: {fp_data['message']}")
-                        status("FINGERPRINT FAILED", "Khong khop van tay", fp_data["message"])
+                        fp_pos = fp_data.get("position", -1)
+                        note = "Dashboard registration waiting for approval"
+                        status("PENDING", "Da enroll mat va van tay", "Cho duyet tren dashboard")
+                        record_pending_face(
+                            embedding=face_data["embedding"],
+                            image_path=face_data.get("capture_path"),
+                            face_score=face_data.get("score"),
+                            face_confidence=face_data.get("confidence"),
+                            fingerprint_position=fp_pos,
+                            note=note,
+                        )
+                        record_attendance(
+                            name="Unknown",
+                            status="pending_unknown_face",
+                            image_path=face_data.get("capture_path"),
+                            face_score=face_data.get("score"),
+                            face_confidence=face_data.get("confidence"),
+                            fingerprint_score=clamp_fingerprint_score(fp_data.get("score")),
+                            note=f"{note}; fingerprint_position={fp_pos}",
+                        )
+                        update_registration_request(
+                            "complete",
+                            "Da enroll mat va van tay. Cho duyet ten tren dashboard.",
+                            fingerprint_position=fp_pos,
+                            image_path=face_data.get("capture_path"),
+                        )
+                        session = reset_session()
+                        state = set_state(state, PipelineState.IDLE, "registration pending")
+                        continue
+                    
+                    if not fp_data["success"]:
+                        fp_score = 0.0
+                        db_confidence = float(face_data.get("score", 0.0) or 0.0)
+                        detector_confidence = face_data.get("confidence")
+                        decision = fuzzy.make_decision(fp_score, db_confidence)
+                        decision_label = fuzzy.classify_decision(decision)
+
+                        logger.warning(
+                            "⚠️ Fingerprint failed or error: %s; fp_score=0.0 db_confidence=%.3f -> decision=%.3f (%s)",
+                            fp_data.get("message"),
+                            db_confidence,
+                            decision,
+                            decision_label,
+                        )
+
+                        status("DENIED", face_data.get("name", "Unknown"), "Khong hop le van tay", "Da tu choi")
+                        record_attendance(
+                            name=face_data.get("name", "Unknown"),
+                            status="denied",
+                            image_path=face_data.get("capture_path"),
+                            face_score=face_data.get("score"),
+                            face_confidence=detector_confidence,
+                            fingerprint_score=fp_score,
+                            decision=decision,
+                            note=f"Fingerprint error or no match: {fp_data.get('message')}",
+                        )
+                        print(f"\n❌ ACCESS DENIED\nFingerprint failure: {fp_data.get('message')}\n")
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "fingerprint failed")
                         continue
@@ -571,19 +680,58 @@ def main():
                         if session.get("fp_action") == "search_unknown":
                             fp_pos = fp_data.get("position", -1)
                             fp_name = db.get_name_by_fp_position(fp_pos)
+                            fp_score = clamp_fingerprint_score(fp_data.get("score"))
+                            db_confidence = float(face_data.get("score", 0.0) or 0.0)
+                            detector_confidence = face_data.get("confidence")
+                            decision = fuzzy.make_decision(fp_score, db_confidence)
+                            decision_label = fuzzy.classify_decision(decision)
                             logger.warning(
-                                "Unknown face but fingerprint belongs to %s; skipping enrollment",
+                                "Unknown face but fingerprint belongs to %s; fp_score=%s db_confidence=%.3f -> decision=%.3f (%s)",
                                 fp_name,
+                                fp_score,
+                                db_confidence,
+                                decision,
+                                decision_label,
                             )
-                            status("REVIEW", "Khuon mat la", f"Van tay thuoc {fp_name}", "Khong dang ki tu dong")
+                            if decision_label == "Accept":
+                                status("GRANTED", fp_name, f"Decision {decision:.3f}")
+                                record_attendance(
+                                    name=fp_name,
+                                    status="success",
+                                    image_path=face_data.get("capture_path"),
+                                    face_score=face_data.get("score"),
+                                    face_confidence=detector_confidence,
+                                    fingerprint_score=fp_score,
+                                    decision=decision,
+                                    note=(
+                                        "Unknown face matched existing "
+                                        f"fingerprint_position={fp_pos}; accepted by fuzzy"
+                                    ),
+                                )
+                                session = reset_session()
+                                state = set_state(state, PipelineState.IDLE, "unknown face accepted by fingerprint")
+                                continue
+
+                            status_value = "manual_review" if decision_label == "Uncertain" else "denied"
+                            status(
+                                "REVIEW" if decision_label == "Uncertain" else "DENIED",
+                                "Khuon mat la",
+                                f"Van tay thuoc {fp_name}",
+                                f"Decision {decision:.3f} ({decision_label})",
+                            )
                             record_attendance(
                                 name="Unknown",
-                                status="manual_review",
+                                status=status_value,
                                 image_path=face_data.get("capture_path"),
                                 face_score=face_data.get("score"),
-                                face_confidence=face_data.get("confidence"),
-                                fingerprint_score=fp_data.get("score"),
-                                note=f"Unknown face matched existing fingerprint_position={fp_pos}; enrollment skipped",
+                                face_confidence=detector_confidence,
+                                fingerprint_score=fp_score,
+                                decision=decision,
+                                note=(
+                                    "Unknown face matched existing "
+                                    f"fingerprint_position={fp_pos}; enrollment skipped; "
+                                    f"fuzzy={decision_label}"
+                                ),
                             )
                             session = reset_session()
                             state = set_state(state, PipelineState.IDLE, "unknown face matched fingerprint")
@@ -605,7 +753,7 @@ def main():
                             image_path=face_data.get("capture_path"),
                             face_score=face_data.get("score"),
                             face_confidence=face_data.get("confidence"),
-                            fingerprint_score=fp_data.get("score"),
+                            fingerprint_score=clamp_fingerprint_score(fp_data.get("score")),
                             note=f"Unknown face waiting for dashboard approval; fingerprint_position={fp_pos}",
                         )
                         session = reset_session()
@@ -619,6 +767,11 @@ def main():
                     if time.time() - session["fp_requested_at"] > cfg["fp_timeout"]:
                         logger.warning("⏱️ Fingerprint scan timeout")
                         status("TIMEOUT", "Qua thoi gian quet van tay", "Thu lai")
+                        if session.get("mode") == "registration":
+                            update_registration_request(
+                                "failed",
+                                "Timeout khi enroll van tay.",
+                            )
                         session = reset_session()
                         state = set_state(state, PipelineState.IDLE, "fingerprint timeout")
                     else:
@@ -630,32 +783,42 @@ def main():
 
                 fp_pos = fp_data["position"]
                 fp_name = db.get_name_by_fp_position(fp_pos)
-                fp_score = fp_data["score"]
+                fp_score = clamp_fingerprint_score(fp_data["score"])
 
                 logger.info(f"🔍 Fingerprint: {fp_name} (score={fp_score})")
 
                 face_name = face_data["name"]
-                face_conf = face_data["confidence"]
+                db_confidence = float(face_data.get("score", 0.0) or 0.0)
+                detector_confidence = face_data.get("confidence")
 
                 if fp_name != face_name:
-                    logger.warning(f"❌ BIOMETRIC MISMATCH (face={face_name}, fp={fp_name})")
-                    status("DENIED", face_name, f"Van tay thuoc {fp_name}")
+                    logger.warning(f"❌ BIOMETRIC MISMATCH (face={face_name}, fp={fp_name}); forcing fp_score=0.0 and reject")
+                    fp_score = 0.0
+                    decision = 0.0
+                    decision_label = "Reject"
+                    status("DENIED", face_name, f"Van tay thuoc {fp_name}", "Da tu choi")
                     record_attendance(
                         name=face_name,
                         status="denied",
                         image_path=face_data.get("capture_path"),
                         face_score=face_data.get("score"),
-                        face_confidence=face_conf,
+                        face_confidence=detector_confidence,
                         fingerprint_score=fp_score,
-                        note=f"Fingerprint belongs to {fp_name}",
+                        decision=decision,
+                        note=f"Biometric mismatch: fingerprint belongs to {fp_name}",
                     )
                     print("\n❌ ACCESS DENIED - Biometric mismatch\n")
                     session = reset_session()
                     state = set_state(state, PipelineState.IDLE, "biometric mismatch")
                     continue
 
-                decision = fuzzy.make_decision(fp_score, face_conf)
-                logger.info(f"🧠 Fuzzy decision: {decision:.3f}")
+                decision = fuzzy.make_decision(fp_score, db_confidence)
+                logger.info(
+                    "🧠 Fuzzy decision: %.3f (fp_score=%s, db_confidence=%.3f)",
+                    decision,
+                    fp_score,
+                    db_confidence,
+                )
 
                 decision_label = fuzzy.classify_decision(decision)
 
@@ -666,7 +829,7 @@ def main():
                         status="success",
                         image_path=face_data.get("capture_path"),
                         face_score=face_data.get("score"),
-                        face_confidence=face_conf,
+                        face_confidence=detector_confidence,
                         fingerprint_score=fp_score,
                         decision=decision,
                         note="Access granted",
@@ -679,7 +842,7 @@ def main():
                         status="manual_review",
                         image_path=face_data.get("capture_path"),
                         face_score=face_data.get("score"),
-                        face_confidence=face_conf,
+                        face_confidence=detector_confidence,
                         fingerprint_score=fp_score,
                         decision=decision,
                         note="Manual verification needed",
@@ -692,7 +855,7 @@ def main():
                         status="denied",
                         image_path=face_data.get("capture_path"),
                         face_score=face_data.get("score"),
-                        face_confidence=face_conf,
+                        face_confidence=detector_confidence,
                         fingerprint_score=fp_score,
                         decision=decision,
                         note="Low confidence",
