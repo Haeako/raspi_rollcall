@@ -177,10 +177,16 @@
                         <span id="rollcallStatusNote">{{ attendance_status.note or '-' }}</span>
                     </div>
                 </div>
-                <button id="rollcallStatusDetailButton" class="btn btn-outline-primary {% if not attendance_status.latest_id %}d-none{% endif %}" data-id="{{ attendance_status.latest_id or '' }}" type="button" onclick="showDetail(this)">
-                    <i class="fa-solid fa-circle-info me-1"></i>Chi Tiết
-                </button>
+                <div class="d-flex flex-column flex-sm-row gap-2">
+                    <button id="registrationButton" class="btn btn-primary" type="button" onclick="startRegistration(this)">
+                        <i class="fa-solid fa-fingerprint me-1"></i>Đăng kí
+                    </button>
+                    <button id="rollcallStatusDetailButton" class="btn btn-outline-primary {% if not attendance_status.latest_id %}d-none{% endif %}" data-id="{{ attendance_status.latest_id or '' }}" type="button" onclick="showDetail(this)">
+                        <i class="fa-solid fa-circle-info me-1"></i>Chi Tiết
+                    </button>
+                </div>
             </div>
+            <div id="registrationMessage" class="px-3 pb-3 small text-muted"></div>
         </div>
 
         <div class="card mb-4">
@@ -203,10 +209,10 @@
                         <div class="flex-grow-1">
                             <div class="fw-semibold">#{{ face.id }} - {{ face.time }}</div>
                             <div class="text-muted small">
-                                Score {{ '%.3f'|format(face.face_score or 0) }} · Confidence {{ '%.3f'|format(face.face_confidence or 0) }}
+                                DB confidence {{ '%.3f'|format(face.face_score or 0) }} · Face detect {{ '%.3f'|format(face.face_confidence or 0) }}
                                 · FP #{{ face.fingerprint_position }}
                             </div>
-                            <div class="text-muted small">{{ face.note or 'Dang cho duyet' }}</div>
+                            <div id="pending-note-{{ face.id }}" class="text-muted small">{{ face.note or 'Dang cho duyet' }}</div>
                         </div>
                         <form class="pending-form d-flex gap-2" onsubmit="approveFace(event, {{ face.id }})">
                             <input class="form-control form-control-sm" name="name" placeholder="Ho ten" required>
@@ -335,15 +341,15 @@
                                     <div id="detailTime" class="detail-value"></div>
                                 </div>
                                 <div class="col-6">
-                                    <div class="detail-label">Face score</div>
+                                    <div class="detail-label">DB confidence</div>
                                     <div id="detailFaceScore" class="detail-value"></div>
                                 </div>
                                 <div class="col-6">
-                                    <div class="detail-label">Face confidence</div>
+                                    <div class="detail-label">Face detect confidence</div>
                                     <div id="detailFaceConfidence" class="detail-value"></div>
                                 </div>
                                 <div class="col-6">
-                                    <div class="detail-label">Fingerprint score</div>
+                                    <div class="detail-label">Fingerprint match score</div>
                                     <div id="detailFingerprintScore" class="detail-value"></div>
                                 </div>
                                 <div class="col-6">
@@ -376,6 +382,7 @@
     <script>
         const modal = new bootstrap.Modal(document.getElementById('attendanceModal'));
         let currentAttendanceId = null;
+        let registrationLastStatus = null;
 
         function updateClock() {
             var now = new Date();
@@ -390,6 +397,30 @@
                 return '-';
             }
             return Number(value).toFixed(digits);
+        }
+
+        function clampFingerprintScore(value) {
+            if (value === null || value === undefined || value === '') {
+                return value;
+            }
+            return Math.max(0, Math.min(Number(value), 300));
+        }
+
+        function decisionLabel(value) {
+            if (value === null || value === undefined || value === '') {
+                return '-';
+            }
+
+            const score = Number(value);
+            if (score >= 0.65) return 'Accept';
+            if (score < 0.30) return 'Reject';
+            return 'Uncertain';
+        }
+
+        function formatDecision(value) {
+            const score = formatNumber(value, 3);
+            if (score === '-') return '-';
+            return score + ' (' + decisionLabel(value) + ')';
         }
 
         function statusLabel(status) {
@@ -457,8 +488,8 @@
             document.getElementById('detailStatus').textContent = statusLabel(item.status);
             document.getElementById('detailFaceScore').textContent = formatNumber(item.face_score, 3);
             document.getElementById('detailFaceConfidence').textContent = formatNumber(item.face_confidence, 3);
-            document.getElementById('detailFingerprintScore').textContent = formatNumber(item.fingerprint_score, 0);
-            document.getElementById('detailDecision').textContent = formatNumber(item.decision, 3);
+            document.getElementById('detailFingerprintScore').textContent = formatNumber(clampFingerprintScore(item.fingerprint_score), 0);
+            document.getElementById('detailDecision').textContent = formatDecision(item.decision);
             document.getElementById('detailNote').textContent = item.note || '-';
             document.getElementById('manualReviewActions').classList.toggle(
                 'd-none',
@@ -495,6 +526,67 @@
             }
 
             window.location.reload();
+        }
+
+        async function refreshRegistrationStatus() {
+            const button = document.getElementById('registrationButton');
+            const message = document.getElementById('registrationMessage');
+
+            try {
+                const response = await fetch('/api/register/status', {cache: 'no-store'});
+                if (!response.ok) return;
+
+                const item = await response.json();
+                const active = item.status === 'requested' || item.status === 'running';
+                button.disabled = active;
+                message.textContent = item.message || '';
+
+                if (active) {
+                    button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Đang đăng kí';
+                } else {
+                    button.innerHTML = '<i class="fa-solid fa-fingerprint me-1"></i>Đăng kí';
+                }
+
+                if (item.status === 'complete') {
+                    message.className = 'px-3 pb-3 small text-success';
+                } else if (item.status === 'failed') {
+                    message.className = 'px-3 pb-3 small text-danger';
+                } else {
+                    message.className = 'px-3 pb-3 small text-muted';
+                }
+
+                if (
+                    item.status === 'complete'
+                    && (registrationLastStatus === 'requested' || registrationLastStatus === 'running')
+                ) {
+                    setTimeout(() => window.location.reload(), 800);
+                }
+                registrationLastStatus = item.status;
+            } catch (error) {
+                message.textContent = 'Khong doc duoc trang thai dang ki.';
+                message.className = 'px-3 pb-3 small text-danger';
+            }
+        }
+
+        async function startRegistration(button) {
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Đang đăng kí';
+
+            const response = await fetch('/api/register/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})
+            });
+
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) {
+                button.disabled = false;
+                button.innerHTML = '<i class="fa-solid fa-fingerprint me-1"></i>Đăng kí';
+                alert(result.error || 'Khong bat dau dang ki duoc.');
+                return;
+            }
+
+            refreshRegistrationStatus();
         }
 
         async function approveFace(event, id) {
@@ -543,7 +635,9 @@
 
         setInterval(updateClock, 1000);
         setInterval(refreshRollcallStatus, 3000);
+        setInterval(refreshRegistrationStatus, 2000);
         updateClock();
+        refreshRegistrationStatus();
     </script>
 </body>
 </html>

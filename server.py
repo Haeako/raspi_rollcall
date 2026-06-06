@@ -8,7 +8,13 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory, url_for
 
-from attendance_store import ATTENDANCE_DB, CAPTURES_DIR, init_attendance_db
+from attendance_store import (
+    ATTENDANCE_DB,
+    CAPTURES_DIR,
+    get_registration_request,
+    init_attendance_db,
+    request_registration,
+)
 
 
 app = Flask(__name__)
@@ -220,6 +226,7 @@ def delete_fingerprint_template(position):
 
     sensor = AS608_HAL()
     result = sensor.delete(position)
+
     return {
         "success": result.success,
         "message": result.message,
@@ -361,6 +368,26 @@ def attendance_stats():
 @app.route("/api/status")
 def attendance_status():
     return jsonify(get_attendance_status())
+
+
+@app.route("/api/register/status")
+def register_status():
+    payload = get_registration_request()
+    if not payload:
+        payload = {
+            "status": "idle",
+            "message": "Chua co yeu cau dang ki.",
+        }
+    return jsonify(payload)
+
+
+@app.route("/api/register/start", methods=["POST"])
+def start_registration():
+    payload = request_registration()
+    return jsonify({
+        "success": True,
+        **payload,
+    })
 
 
 @app.route("/api/attendance/<int:attendance_id>")
