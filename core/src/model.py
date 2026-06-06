@@ -133,18 +133,9 @@ class FuzzyModel:
         self.confidence["medium"] = fuzz.trimf( self.confidence.universe,[0.25, 0.50, 0.75],)
         self.confidence["high"] = fuzz.trapmf(self.confidence.universe,[0.50, 0.75, 1.00, 1.00])
 
-        self.decision["reject"] = fuzz.trapmf(
-            self.decision.universe,
-            [0.00, 0.00, 0.25, 0.50],
-        )
-        self.decision["uncertain"] = fuzz.trimf(
-            self.decision.universe,
-            [0.25, 0.50, 0.75],
-        )
-        self.decision["accept"] = fuzz.trapmf(
-            self.decision.universe,
-            [0.50, 0.75, 1.00, 1.00],
-        )
+        self.decision["reject"] = fuzz.trapmf( self.decision.universe, [0.00, 0.00, 0.25, 0.50])
+        self.decision["uncertain"] = fuzz.trimf(self.decision.universe,[0.25, 0.50, 0.75])
+        self.decision["accept"] = fuzz.trapmf(self.decision.universe,[0.50, 0.75, 1.00, 1.00])
 
         rules = [
             ctrl.Rule(
